@@ -3,139 +3,216 @@ import numpy as np
 import time
 
 class CameraVisionModule:
-    def __init__(self, CameraNumber):
-        self.Camera_Cap = cv2.VideoCapture(CameraNumber)
-        _, self.Frame = self.Camera_Cap.read()
-        self.Camera_Cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.Camera_Cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self.Center_X = self.Frame.shape[1] // 2
-        self.Center_Y = self.Frame.shape[0] // 2
-        self._last_calib_time = {'red': 0, 'blue': 0}
-        self._cached_mask = {'red': None, 'blue': None}
+    def __init__(self, OuterCam=0, InnerCam=1):
+        # Outer camera for puck detection
+        self.OuterCam_Cap = cv2.VideoCapture(OuterCam)
+        _, self.OuterFrame = self.OuterCam_Cap.read()
+        self.OuterCam_Cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.OuterCam_Cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        # Inner camera for puck classification
+        self.InnerCam_Cap = cv2.VideoCapture(InnerCam)
+        _, self.InnerFrame = self.InnerCam_Cap.read()
+        self.InnerCam_Cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.InnerCam_Cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.InnerCam_Status = 'n'  # 'r', 'b', 'n'
+
         self.hsv_thresholds = {
             'red': [(0, 120, 70), (10, 255, 255), (170, 120, 70), (180, 255, 255)],
             'blue': [(100, 120, 70), (140, 255, 255)]
         }
-        self.hsv_thresholds = {
-            'red': [(0, 120, 70), (10, 255, 255), (170, 120, 70), (180, 255, 255)],
-            'blue': [(100, 120, 70), (140, 255, 255)]
-        }
+        self.height_ratios = [0.25, 0.35, 0.40]
+        self.width_ratios = [0.20, 0.30, 0.30, 0.20]
+        self.last_calib = 0
+        self.last_decision = 0
+        self.puckSatArr = np.zeros((2, 3, 4), dtype=int)  # [color, row, col]
 
-    def Read_Frame(self):
-        _, self.Frame = self.Camera_Cap.read()
+        # Robot motion control parameters
+        # self.speed = 0
+        # self.direction = 0
+        self.Collect = True
+        self.state = 'm'  # 'l', 'r', 'm', 'n'
+        self.NoPuckCount = 0
 
-    def auto_calibrate(self):
-        hsv_img = self.Hsv_Frame()
+    def decision(self):  # state -> l, r, m, n
+        freq = (self.puckSatArr[0]//100) + (self.puckSatArr[1]//100)
+        L = freq[0, 0]*7 + freq[1, 0]*8 + freq[2, 0]*9 + freq[2, 1]*10
+        M = freq[0, 1]*7 + freq[0, 2]*7 + freq[1, 1]*10 + freq[1, 2]*10
+        R = freq[0, 3]*7 + freq[1, 3]*8 + freq[2, 3]*9 + freq[2, 2]*10
+        if L > M and L > R:
+            self.state = 'l'
+        elif R > M and R > L:
+            self.state = 'r'
+        elif M == 0 and L == 0 and R == 0:
+            self.state = 'n'
+        elif M >= L and M >= R:
+            self.state = 'm'
+        else:
+            return False
+        return True
+
+    def Move(self):
+        if self.Collect: 
+            if self.state == 'l':
+                # TODO: Add actuator control to move left
+                pass
+            elif self.state == 'r':
+                # TODO: Add actuator control to move right
+                pass
+            elif self.state == 'm':
+                # TODO: Add actuator control to move forward
+                pass
+            elif self.state == 'n':
+                self.NoPuckCount += 1
+                if self.NoPuckCount > 3:
+                    # TODO: Go to base
+                    pass
+                pass
+        else: 
+            # Error handling
+            pass
+
+    def classify(self):
+        if self.inner_cam():
+            if self.InnerCam_Status == 'r':
+                # TODO: Red puck sorting actuator control
+                pass
+            elif self.InnerCam_Status == 'b':
+                # TODO: Blue puck sorting actuator control
+                pass
+            else:
+                # TODO: No puck detected handling
+                pass
+            return True
+        return False
+
+    def read_frames(self):
+        O, self.OuterFrame = self.OuterCam_Cap.read()
+        I, self.InnerFrame = self.InnerCam_Cap.read()
+        if not O or not I:
+            return False
+        return True
+
+    def auto_calibrate(self, frequency=10): # hsv_thresholds
+        now = time.time()
+        if now - self.last_calib < frequency:
+            return False
+        
+        self.last_calib = now
+        hsv_img = cv2.cvtColor(self.OuterFrame, cv2.COLOR_BGR2HSV)
         pixels = hsv_img.reshape(-1, 3)
         pixels = np.float32(pixels)
-        K = 3
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-        _, labels, centers = cv2.kmeans(pixels, K, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-        # Closest cluster
-        target_hsv = {'red': np.array([0, 255, 255]), 'blue': np.array([120, 255, 255])}
+        K = 4
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
+        _, _, centers = cv2.kmeans(pixels, K, None, criteria, 10, cv2.KMEANS_PP_CENTERS)
+        
+        target_hsv = {'red': np.array([5, 150, 150]), 'blue': np.array([110, 150, 150])}
+        
         for color in ['red', 'blue']:
             distances = [np.linalg.norm(center - target_hsv[color]) for center in centers]
             best_idx = np.argmin(distances)
-            center_hsv = centers[best_idx]
-            h, s, v = center_hsv
+            h, s, v = centers[best_idx]
+            
             if color == 'red':
+                h_tolerance = 25
+                s_tolerance = 70
+                v_tolerance = 70
+                
+                lower1_h = max(0, int(h) - h_tolerance)
+                upper1_h = min(10, int(h) + h_tolerance)
+                lower2_h = max(170, 180 - h_tolerance)
+                upper2_h = min(180, 180 + h_tolerance)
+                
+                if int(h) > 170:
+                    lower2_h = max(170, int(h) - h_tolerance)
+                    upper2_h = min(180, int(h) + h_tolerance)
+                
                 self.hsv_thresholds['red'] = [
-                    (max(0, int(h)-10), max(0, int(s)-60), max(0, int(v)-60)),
-                    (min(10, int(h)+10), min(255, int(s)+60), min(255, int(v)+60)),
-                    (max(170, int(h)-10), max(0, int(s)-60), max(0, int(v)-60)),
-                    (min(180, int(h)+10), min(255, int(s)+60), min(255, int(v)+60))
+                    (lower1_h, max(60, int(s) - s_tolerance), max(60, int(v) - v_tolerance)),
+                    (upper1_h, min(255, int(s) + s_tolerance), min(255, int(v) + v_tolerance)),
+                    (lower2_h, max(60, int(s) - s_tolerance), max(60, int(v) - v_tolerance)),
+                    (upper2_h, min(255, int(s) + s_tolerance), min(255, int(v) + v_tolerance))
                 ]
-            else:
+            else:  # blue
+                h_tolerance = 60
+                s_tolerance = 100
+                v_tolerance = 100
+                
                 self.hsv_thresholds['blue'] = [
-                    (max(100, int(h)-20), max(0, int(s)-60), max(0, int(v)-60)),
-                    (min(140, int(h)+20), min(255, int(s)+60), min(255, int(v)+60))
+                    (max(100, int(h) - h_tolerance), max(60, int(s) - s_tolerance), max(60, int(v) - v_tolerance)),
+                    (min(140, int(h) + h_tolerance), min(255, int(s) + s_tolerance), min(255, int(v) + v_tolerance))
                 ]
-            #print(f"Auto-calibrated HSV for {color}: {self.hsv_thresholds[color]}")
-    def Hsv_Frame(self):
-        return cv2.cvtColor(self.Frame, cv2.COLOR_BGR2HSV)
-    def Red_Blue(self, color):
-        hsv = self.Hsv_Frame()
-        if color == 'red':
-            t = self.hsv_thresholds['red']
-            lower1 = np.array(t[0])
-            upper1 = np.array(t[1])
-            lower2 = np.array(t[2])
-            upper2 = np.array(t[3])
-            mask1 = cv2.inRange(hsv, lower1, upper1)
-            mask2 = cv2.inRange(hsv, lower2, upper2)
-            mask = mask1 | mask2
-        elif color == 'blue':
-            t = self.hsv_thresholds['blue']
-            lower = np.array(t[0])
-            upper = np.array(t[1])
-            mask = cv2.inRange(hsv, lower, upper)
-        else:
-            mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-        return mask
+        
+        return True
 
-    def Detect_rectangle(self):
-        gray = cv2.cvtColor(self.Frame, cv2.COLOR_BGR2GRAY)
-        ret, thresh = cv2.threshold(gray, 10, 255, 0)
-        contours, hierarchy = cv2.findContours(thresh, 1, 2)
-        for cnt in contours:
-            x1, y1 = cnt[0][0]
-            approx = cv2.approxPolyDP(cnt, 0.01*cv2.arcLength(cnt, True), True)
-            if len(approx) == 4:
-                x, y, w, h = cv2.boundingRect(cnt)
-                ratio = float(w)/h
-                #print("ok")
-                if ratio >= 0.9 and ratio <= 1.1:
-                    cv2.drawContours(self.Frame, [cnt], -1, (0,255,255), 3)
-                    cv2.putText(self.Frame, 'Square', (x1, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-                else:
-                    cv2.putText(self.Frame, 'Rectangle', (x1, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    cv2.drawContours(self.Frame, [cnt], -1, (0,255,0), 3)
-
-    def Detect_Shape(self, color='blue'):
-        mask = self.Red_Blue(color)
-        shapes = self.detect_masked_shapes(mask, color)
-        return shapes
-
-    def Grid_Puck_Count(self):
-        h, w = self.Frame.shape[:2]
-        height_ratios = [0.25, 0.35, 0.40]
-        width_ratios = [0.20, 0.30, 0.30, 0.20]
-        height_bounds = [int(sum(height_ratios[:i]) * h) for i in range(4)]
-        width_bounds = [int(sum(width_ratios[:i]) * w) for i in range(5)]
-        puckSatArr = np.zeros((2, 3, 4), dtype=int)
-        hsv_ranges = {
-            'red': [([0,120,70], [10,255,255]), ([170,120,70], [180,255,255])],
-            'blue': [([100,120,70], [140,255,255])]
-        }
+    def grid_puck_count(self): # puckSatArr
+        h, w = self.OuterFrame.shape[:2]
+        height_bounds = [int(sum(self.height_ratios[:i]) * h) for i in range(4)]
+        width_bounds = [int(sum(self.width_ratios[:i]) * w) for i in range(5)]
+        self.puckSatArr = np.zeros((2, 3, 4), dtype=int)
         kernel = np.ones((5,5),np.uint8)
         for color_idx, color in enumerate(['red', 'blue']):
             for i in range(3):
                 for j in range(4):
                     y1, y2 = height_bounds[i], height_bounds[i+1]
                     x1, x2 = width_bounds[j], width_bounds[j+1]
-                    roi_hsv = cv2.cvtColor(self.Frame[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+                    roi_hsv = cv2.cvtColor(self.OuterFrame[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
                     mask = np.zeros(roi_hsv.shape[:2], dtype=np.uint8)
-                    for lower, upper in hsv_ranges[color]:
-                        mask |= cv2.inRange(roi_hsv, np.array(lower), np.array(upper))
+
+                    if color == 'red':
+                        t = self.hsv_thresholds['red']
+                        mask |= cv2.inRange(roi_hsv, np.array(t[0]), np.array(t[1]))
+                        mask |= cv2.inRange(roi_hsv, np.array(t[2]), np.array(t[3]))
+                    else:  # blue
+                        t = self.hsv_thresholds['blue']
+                        mask |= cv2.inRange(roi_hsv, np.array(t[0]), np.array(t[1]))
                     mask = cv2.erode(mask, kernel)
+
+                    # cv2.imshow(f"{color}_mask_r{i}_c{j}", mask)
+
                     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
                     for cnt in contours:
                         area = cv2.contourArea(cnt)
                         approx = cv2.approxPolyDP(cnt, 0.01*cv2.arcLength(cnt, True), True)
-                        if area > 2000:
+                        if area > 1000:
                             if len(approx) == 4:
-                                puckSatArr[color_idx, i, j] += 100
+                                self.puckSatArr[color_idx, i, j] += 100
                             elif len(approx) > 5:
-                                puckSatArr[color_idx, i, j] += 1
-        return puckSatArr
+                                self.puckSatArr[color_idx, i, j] += 1
+        return True
 
-    def decorate(self, puckSatArr):
-        h, w = self.Frame.shape[:2]
-        height_ratios = [0.25, 0.35, 0.40]
-        width_ratios = [0.20, 0.30, 0.30, 0.20]
-        height_bounds = [int(sum(height_ratios[:i]) * h) for i in range(4)]
-        width_bounds = [int(sum(width_ratios[:i]) * w) for i in range(5)]
-        # Display number of detected shapes
+    def inner_cam(self): # InnerCam_Status -> r, b, n
+        if self.InnerFrame is None:
+            return False
+        
+        hsv_inner = cv2.cvtColor(self.InnerFrame, cv2.COLOR_BGR2HSV)
+        
+        # Red
+        red_mask1 = cv2.inRange(hsv_inner, np.array([0, 120, 70]), np.array([10, 255, 255]))
+        red_mask2 = cv2.inRange(hsv_inner, np.array([170, 120, 70]), np.array([180, 255, 255]))
+        red_mask = red_mask1 | red_mask2
+        red_area = cv2.countNonZero(red_mask)
+        
+        # Blue
+        blue_mask = cv2.inRange(hsv_inner, np.array([100, 120, 70]), np.array([140, 255, 255]))
+        blue_area = cv2.countNonZero(blue_mask)
+        
+        thres = 500
+        
+        if red_area > thres:
+            self.InnerCam_Status = 'r'
+        elif blue_area > thres:
+            self.InnerCam_Status = 'b'
+        else:
+            self.InnerCam_Status = 'n'
+        return True
+
+    def decorate(self):
+        # Outer camera decoration
+        h, w = self.OuterFrame.shape[:2]
+        height_bounds = [int(sum(self.height_ratios[:i]) * h) for i in range(4)]
+        width_bounds = [int(sum(self.width_ratios[:i]) * w) for i in range(5)]
+        # Display detected shapes
         for i in range(3):
             for j in range(4):
                 y1, y2 = height_bounds[i], height_bounds[i+1]
@@ -143,83 +220,69 @@ class CameraVisionModule:
                 cx = (x1 + x2) // 2
                 cy = (y1 + y2) // 2
                 # Red cell
-                red_val = puckSatArr[0, i, j]
+                red_val = self.puckSatArr[0, i, j]
                 red_bases = red_val // 100
                 red_circles = red_val % 100
                 # Blue cell
-                blue_val = puckSatArr[1, i, j]
+                blue_val = self.puckSatArr[1, i, j]
                 blue_bases = blue_val // 100
                 blue_circles = blue_val % 100
                 # Draw counts
-                cv2.putText(self.Frame, f"{red_circles}", (cx-30, cy), cv2.FONT_ITALIC, 0.8, (0,0,255), 1)
-                cv2.putText(self.Frame, f"{red_bases}", (cx-10, cy), cv2.FONT_ITALIC, 0.6, (0,0,255), 2)
-                cv2.putText(self.Frame, f"{blue_circles}", (cx+30, cy), cv2.FONT_ITALIC, 0.8, (255,0,0), 1)
-                cv2.putText(self.Frame, f"{blue_bases}", (cx+10, cy), cv2.FONT_ITALIC, 0.6, (255,0,0), 2)
-
+                cv2.putText(self.OuterFrame, f"{red_circles}", (cx-30, cy), cv2.FONT_ITALIC, 0.8, (0,0,255), 1)
+                cv2.putText(self.OuterFrame, f"{red_bases}", (cx-10, cy), cv2.FONT_ITALIC, 0.6, (0,0,255), 2)
+                cv2.putText(self.OuterFrame, f"{blue_circles}", (cx+30, cy), cv2.FONT_ITALIC, 0.8, (255,0,0), 1)
+                cv2.putText(self.OuterFrame, f"{blue_bases}", (cx+10, cy), cv2.FONT_ITALIC, 0.6, (255,0,0), 2)
         # Draw grid lines
         for y in height_bounds:
-            cv2.line(self.Frame, (0, y), (w, y), (255, 255, 255), 2)
+            cv2.line(self.OuterFrame, (0, y), (w, y), (255, 255, 255), 2)
         for x in width_bounds:
-            cv2.line(self.Frame, (x, 0), (x, h), (255, 255, 255), 2)
+            cv2.line(self.OuterFrame, (x, 0), (x, h), (255, 255, 255), 2)
 
-    def detect_masked_shapes(self, mask, color=None):
-        kernel = np.ones((5,5),np.uint8)
-        mask_kernel = cv2.erode(mask, kernel)
-        contours, _ = cv2.findContours(mask_kernel, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        shapes = []
-        color_map = {'red': (0,0,255), 'blue': (255,0,0)}
-        draw_color = color_map.get(color, (0,255,0))
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            approx = cv2.approxPolyDP(cnt, 0.01*cv2.arcLength(cnt, True), True)
-            if area > 2000:
-                cv2.drawContours(self.Frame, [cnt], -1, draw_color, 2)
-                if len(approx) == 4:
-                    shapes.append('quadrilateral')
-                elif 8 < len(approx) < 16:
-                    shapes.append('circle')
-                elif 3 < len(approx) < 5:
-                    shapes.append('rectangle')
-        return shapes
-
-    def Detect_rectangle(self):
-        gray = cv2.cvtColor(self.Frame, cv2.COLOR_BGR2GRAY)
-        ret, thresh = cv2.threshold(gray, 10, 255, 0)
-        contours, hierarchy = cv2.findContours(thresh, 1, 2)
-        for cnt in contours:
-            x1, y1 = cnt[0][0]
-            approx = cv2.approxPolyDP(cnt, 0.01*cv2.arcLength(cnt, True), True)
-            if len(approx) == 4:
-                x, y, w, h = cv2.boundingRect(cnt)
-                ratio = float(w)/h
-                #print("ok")
-                if ratio >= 0.9 and ratio <= 1.1:
-                    cv2.drawContours(self.Frame, [cnt], -1, (0,255,255), 3)
-                    #cv2.putText(self.Frame, 'Square', (x1, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-                else:
-                    pass
-                    #cv2.putText(self.Frame, 'Rectangle', (x1, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        # Inner camera decoration
+        if self.InnerFrame is not None:
+            if self.InnerCam_Status == 'r':
+                status_color = (0, 0, 255)    # Red
+                status_text = "RED"
+            elif self.InnerCam_Status == 'b':
+                status_color = (255, 0, 0)    # Blue  
+                status_text = "BLUE"
+            else:
+                status_color = (255, 255, 255)  # White
+                status_text = "NONE"
+            
+            cv2.putText(self.InnerFrame, status_text, (280, 250), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.5, status_color, 3)
 
 def main():
-    Cam_obj = CameraVisionModule(0)
-    import time
-    last_grid_print = 0
-    last_calib = 0
+    Cam_obj = CameraVisionModule(0, 0)
+    last_decision = 0
     while True:
-        Cam_obj.Read_Frame()
+        if not Cam_obj.read_frames():
+            continue
+        
         now = time.time()
-        # Force calibration every 10 seconds
-        if now - last_calib >= 10:
-            Cam_obj._cached_mask = {'red': None, 'blue': None}
-            Cam_obj.Read_Frame()  # Ensure frame is valid before calibration
-            Cam_obj.auto_calibrate()
-            last_calib = now
-        Cam_obj.Detect_rectangle()
-        puck_grid = Cam_obj.Grid_Puck_Count()
-        Cam_obj.decorate(puck_grid)
-        cv2.imshow("code_test", Cam_obj.Frame)
+        
+        Cam_obj.auto_calibrate()  # frequency=10
+        Cam_obj.grid_puck_count()
+        
+        if now - last_decision >= 5:  # frequency=5
+            Cam_obj.decision()
+            last_decision = now
+            print(f"Decision: {Cam_obj.state}, Inner Status: {Cam_obj.InnerCam_Status}")
+        
+        # Movement control
+        Cam_obj.Move()
+        
+        Cam_obj.classify()  # inner_cam is called within classify
+        Cam_obj.decorate()
+
+        # Display both cameras
+        cv2.imshow("Inner Camera", Cam_obj.InnerFrame)
+        cv2.imshow("Outer Camera", Cam_obj.OuterFrame)
+        
         if cv2.waitKey(1) == ord('q'):
-            Cam_obj.Camera_Cap.release()
+            Cam_obj.OuterCam_Cap.release()
+            Cam_obj.InnerCam_Cap.release()
             cv2.destroyAllWindows()
             break
 
