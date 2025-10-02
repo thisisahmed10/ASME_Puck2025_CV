@@ -1,9 +1,11 @@
 import cv2
 import numpy as np
 import time
+import sys
+import motors
 
 class CameraVisionModule:
-    def __init__(self, OuterCam=0, InnerCam=1):
+    def __init__(self,we = 0, OuterCam=0, InnerCam=1):
         # Outer camera for puck detection
         self.OuterCam_Cap = cv2.VideoCapture(OuterCam)
         _, self.OuterFrame = self.OuterCam_Cap.read()
@@ -22,23 +24,24 @@ class CameraVisionModule:
             'blue': [(100, 120, 70), (140, 255, 255)]
         }
         self.height_ratios = [0.25, 0.35, 0.40]
-        self.width_ratios = [0.20, 0.30, 0.30, 0.20]
+        self.width_ratios = [0.20, 0.20, 0.20, 0.20, 0.20]
         self.last_calib = 0
         self.last_decision = 0
+        self.Last_move = 0
         self.puckSatArr = np.zeros((2, 3, 4), dtype=int)  # [color, row, col]
 
         # Robot motion control parameters
-        # self.speed = 0
-        # self.direction = 0
+        self.speed = 50
         self.Collect = True
         self.state = 'm'  # 'l', 'r', 'm', 'n'
         self.NoPuckCount = 0
+        self.we = we #  0 -> 'red', 1 -> 'blue'
 
     def decision(self):  # state -> l, r, m, n
         freq = (self.puckSatArr[0]//100) + (self.puckSatArr[1]//100)
-        L = freq[0, 0]*7 + freq[1, 0]*8 + freq[2, 0]*9 + freq[2, 1]*10
-        M = freq[0, 1]*7 + freq[0, 2]*7 + freq[1, 1]*10 + freq[1, 2]*10
-        R = freq[0, 3]*7 + freq[1, 3]*8 + freq[2, 3]*9 + freq[2, 2]*10
+        L = freq[0, 0]*6 + freq[1, 0]*7 + freq[2, 0]*8 + freq[1, 1]*9 + freq[2, 1]*10
+        M = freq[0, 1]*6 + freq[0, 2]*8 + freq[0, 3]*6 + freq[1, 2]*10 + freq[2, 2]*10
+        R = freq[0, 4]*6 + freq[1, 4]*7 + freq[2, 4]*8 + freq[1, 3]*9 + freq[2, 3]*10
         if L > M and L > R:
             self.state = 'l'
         elif R > M and R > L:
@@ -51,38 +54,66 @@ class CameraVisionModule:
             return False
         return True
 
-    def Move(self):
+    def Move(self, frequency = 3):
+        now = time.time()
+        if now - self.last_calib < frequency:
+            return False
+        motors.init()
+        motors.set_speed(self.speed)
         if self.Collect: 
             if self.state == 'l':
-                # TODO: Add actuator control to move left
-                pass
+                motors.left()
             elif self.state == 'r':
-                # TODO: Add actuator control to move right
-                pass
+                motors.right()
             elif self.state == 'm':
-                # TODO: Add actuator control to move forward
-                pass
+                motors.forward()
             elif self.state == 'n':
                 self.NoPuckCount += 1
                 if self.NoPuckCount > 3:
-                    # TODO: Go to base
-                    pass
-                pass
+                    self.Collect = False
+                    self.goBack()
+            return True
         else: 
-            # Error handling
-            pass
+            print("Not in collection mode")
+
+    def goBack(self):
+        if not self.Collect:
+            base_found = self.check_for_base()
+            
+            if base_found:
+                motors.forward()
+                time.sleep(2)
+            else:
+                for _ in range(4):
+                    motors.right()
+                    time.sleep(0.5)
+                    motors.stop()
+                    time.sleep(0.3)
+                    
+                    if self.read_frames():
+                        self.grid_puck_count()
+                        if self.check_for_base():
+                            motors.forward()
+                            time.sleep(2)
+                            break
+            
+            motors.stop()
+    
+    def check_for_base(self):
+        for x in range(len(self.height_ratios)):
+            for y in range(len(self.width_ratios)):
+                if self.puckSatArr[self.we, x, y] >= 100 and y == 3:
+                    return True
+        return False
 
     def classify(self):
         if self.inner_cam():
             if self.InnerCam_Status == 'r':
-                # TODO: Red puck sorting actuator control
-                pass
+                motors.ServoLeft()
             elif self.InnerCam_Status == 'b':
-                # TODO: Blue puck sorting actuator control
-                pass
+                motors.ServoRight()
             else:
-                # TODO: No puck detected handling
-                pass
+                motors.ServoCentre()
             return True
         return False
 
@@ -254,7 +285,9 @@ class CameraVisionModule:
                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, status_color, 3)
 
 def main():
-    Cam_obj = CameraVisionModule(0, 0)
+
+    we = sys.argv[1]
+    Cam_obj = CameraVisionModule(we, 0, 1)
     last_decision = 0
     while True:
         if not Cam_obj.read_frames():
@@ -270,11 +303,10 @@ def main():
             last_decision = now
             print(f"Decision: {Cam_obj.state}, Inner Status: {Cam_obj.InnerCam_Status}")
         
-        # Movement control
         Cam_obj.Move()
         
         Cam_obj.classify()  # inner_cam is called within classify
-        Cam_obj.decorate()
+        # Cam_obj.decorate()
 
         # Display both cameras
         cv2.imshow("Inner Camera", Cam_obj.InnerFrame)
